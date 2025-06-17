@@ -1,15 +1,13 @@
 '''
 pip install python-docx
 
-Import onlyoffice document server image into docker
+On remote server:
 
-docker load < onlyoffice_documentserver.tar
+docker pull fra.ocir.io/idqj093njucb/libreofficedocker/libreoffice-unoserver:3.19-e2eb67c
+docker run -d -p 3001:2002 fra.ocir.io/idqj093njucb/libreofficedocker/libreoffice-unoserver:3.19-e2eb67c
 
-Run onlyoffice server (https://helpcenter.onlyoffice.com/docs/installation/docs-community-install-docker.aspx):
-
-PORT_NUMBER=80
-docker run -i -t -d -p ${PORT_NUMBER}:80 --restart=always -e JWT_ENABLED=false -e JWT_SECRET=my_jwt_secret onlyoffice/documentserver
-
+On mac:
+kubectl
 '''
 import os
 import time
