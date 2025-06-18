@@ -33,8 +33,9 @@ def save_base64_as_pdf(base64_str, pdf_path):
         f.write(pdf_bytes)
         
 if __name__ == "__main__":
-    input_fn = sys.argv[1]
-    output_fn = sys.argv[2]
+    # input_fn = sys.argv[1]
+    # output_fn = sys.argv[2]
+    input_fn = '/Users/mmilin/tmp/Test Open-WebUI KnowledgeBase/sample.docx'
     
     time_start = time.perf_counter()
     has_image = has_image_in_docx(docx_filename=input_fn)    
