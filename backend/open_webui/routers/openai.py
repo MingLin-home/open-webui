@@ -833,10 +833,16 @@ async def generate_chat_completion(
         for a_file in  form_data['metadata']['files']:
             if a_file['type'] != "file":
                 continue
-            if a_file['file']['meta']['content_type'] != "application/pdf":
+            if a_file['file']['meta']['content_type'] not in (
+                "application/pdf",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation"):
                 continue
-            assert "uploaded_file_base64_string" in a_file["file"]["data"]
+            if "uploaded_file_base64_string" not in a_file["file"]["data"]:
+                continue            
             uploaded_file_base64_string = a_file["file"]["data"]["uploaded_file_base64_string"]
+            if uploaded_file_base64_string is None:
+                continue
             uploaded_file_name = a_file["file"]["meta"]["name"]
             new_content.append({
                 "type": "file",

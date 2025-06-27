@@ -27,7 +27,6 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 import tiktoken
 
-
 from langchain.text_splitter import RecursiveCharacterTextSplitter, TokenTextSplitter
 from langchain_core.documents import Document
 
@@ -41,6 +40,13 @@ from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
 # Document loaders
 from open_webui.retrieval.loaders.main import Loader
 from open_webui.retrieval.loaders.youtube import YoutubeLoader
+
+from PyPDF2 import PdfReader
+from PyPDF2.generic import DictionaryObject, IndirectObject
+from pptx import Presentation
+import docx
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
+import requests
 
 # Web search engines
 from open_webui.retrieval.web.main import SearchResult
@@ -188,6 +194,126 @@ def get_rf(
     return rf
 
 
+def pdf_has_images(path: str) -> bool:
+    """
+    Return True if any page of the PDF at `path` contains
+    at least one XObject image.
+    """
+    reader = PdfReader(path)
+    for page in reader.pages:
+        if _page_has_images(page):
+            return True
+    return False
+
+def _page_has_images(page) -> bool:
+    """
+    Inspect a single PageObject for XObject images.
+    """
+    # 1) grab the /Resources dict
+    res = page.get("/Resources")
+    if isinstance(res, IndirectObject):
+        res = res.get_object()
+    if not isinstance(res, DictionaryObject):
+        return False
+
+    # 2) get its /XObject dict (if present)
+    xobj = res.get("/XObject")
+    if isinstance(xobj, IndirectObject):
+        xobj = xobj.get_object()
+    if not isinstance(xobj, DictionaryObject):
+        return False
+
+    # 3) iterate through all entries in /XObject
+    for xo in xobj.values():
+        if isinstance(xo, IndirectObject):
+            xo = xo.get_object()
+        subtype = xo.get("/Subtype")
+        # if this really is an Image XObject, we’re done
+        if subtype == "/Image":
+            return True
+        # if it’s a Form XObject, it may contain nested images
+        if subtype == "/Form":
+            if _form_has_images(xo):
+                return True
+
+    return False
+
+def _form_has_images(form_xobj) -> bool:
+    """
+    Many Form XObjects carry their own /Resources → /XObject,
+    so recurse into them.
+    """
+    res = form_xobj.get("/Resources")
+    if isinstance(res, IndirectObject):
+        res = res.get_object()
+    if not isinstance(res, DictionaryObject):
+        return False
+
+    xobj = res.get("/XObject")
+    if isinstance(xobj, IndirectObject):
+        xobj = xobj.get_object()
+    if not isinstance(xobj, DictionaryObject):
+        return False
+
+    for xo in xobj.values():
+        if isinstance(xo, IndirectObject):
+            xo = xo.get_object()
+        if xo.get("/Subtype") == "/Image":
+            return True
+        if xo.get("/Subtype") == "/Form":
+            # forms can nest further
+            if _form_has_images(xo):
+                return True
+
+    return False
+
+
+def has_image_in_pptx(pptx_filename):
+    if not pptx_filename.lower().endswith('.pptx'):
+        raise ValueError("The input file must be a .pptx file.")
+    prs = Presentation(pptx_filename)
+
+    # Iterate over all slides and their shapes to check for images
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if shape.shape_type == 13:  # MSO_SHAPE_TYPE.PICTURE = 13
+                return True
+    return False
+
+
+def pptx_to_pdf_base64(pptx_path):
+    url = 'http://127.0.0.1:2004/request'
+    with open(pptx_path, 'rb') as f:
+        files = {'file': (os.path.basename(pptx_path), f, 'application/vnd.openxmlformats-officedocument.presentationml.presentation')}
+        data = {'convert-to': 'pdf'}
+        response = requests.post(url, files=files, data=data)
+        response.raise_for_status()
+        pdf_bytes = response.content
+        b64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
+        return b64_pdf
+
+def has_image_in_docx(docx_filename):
+    if not docx_filename.lower().endswith('.docx'):
+        raise ValueError("The input file must be a .docx file.")
+
+    document = docx.Document(docx_filename)
+    
+    rels = document.part.rels
+    has_image = any(rel.target_ref for rel in rels.values() if rel.reltype == RT.IMAGE)
+    return has_image
+
+def docx_to_pdf_base64(docx_path):
+    url = 'http://127.0.0.1:2004/request'
+    with open(docx_path, 'rb') as f:
+        files = {'file': (docx_path, f, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')}
+        data = {'convert-to': 'pdf'}
+        response = requests.post(url, files=files, data=data)
+        response.raise_for_status()
+        # The response content is the PDF file
+        pdf_bytes = response.content
+        b64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
+        return b64_pdf
+    
 ##########################################
 #
 # API routes
@@ -1367,14 +1493,50 @@ def process_file(
             {"content": text_content},
         )
         
-        # Store PDF base64 for OpenAI API
-        with open(file_path, "rb") as f:
-            upload_file_bytes = f.read()
-        uploaded_file_base64_string = base64.b64encode(upload_file_bytes).decode("utf-8")
-        Files.update_file_data_by_id(
-            file.id,
-            {"uploaded_file_base64_string": uploaded_file_base64_string},
-        )
+        # check file type, if pdf / docx / pptx, use special handling
+        if file_path is not None and file.meta['content_type'] in (
+            "application/pdf",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation"):
+            
+            # check whether the file has image
+            has_image = False
+            if file.meta['content_type'] == "application/pdf":
+                try:
+                    has_image = pdf_has_images(file_path)
+                except Exception as e:
+                    log.debug(f"Error checking images in PDF: {e}")
+            if file.meta['content_type'] == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+                try:
+                    has_image = has_image_in_docx(file_path)
+                except Exception as e:
+                    log.debug(f"Error checking images in PDF: {e}")
+            if file.meta['content_type'] == "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+                try:
+                    has_image = has_image_in_pptx(file_path)
+                except Exception as e:
+                    log.debug(f"Error checking images in PDF: {e}")
+            
+            # only use advanced file processing for files with inner images
+            uploaded_file_base64_string = None
+            if has_image:                
+                if file.meta['content_type'] == "application/pdf":
+                    # Store PDF base64 for OpenAI API
+                    with open(file_path, "rb") as f:
+                        upload_file_bytes = f.read()
+                    uploaded_file_base64_string = base64.b64encode(upload_file_bytes).decode("utf-8")
+                
+                if file.meta['content_type'] == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+                    uploaded_file_base64_string = docx_to_pdf_base64(file_path)                    
+                
+                if file.meta['content_type'] == "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+                    uploaded_file_base64_string = pptx_to_pdf_base64(file_path)
+                
+                Files.update_file_data_by_id(
+                    file.id,
+                    {"uploaded_file_base64_string": uploaded_file_base64_string},
+                )
+                
 
         hash = calculate_sha256_string(text_content)
         Files.update_file_hash_by_id(file.id, hash)
